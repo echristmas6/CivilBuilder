@@ -1,0 +1,275 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Tiny Town — Prototype</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 12px; background:#f0f3f5; }
+    #top { display:flex; gap:12px; align-items:center; margin-bottom:8px; }
+    #canvas { border:1px solid #999; background:#bfe6ff; image-rendering: pixelated; }
+    .tool { padding:6px 10px; border-radius:6px; background:white; border:1px solid #ccc; cursor:pointer; }
+    .tool.active { border-color:#2b7cff; box-shadow:0 2px 6px rgba(43,124,255,0.15); }
+    #stats { margin-left:16px; font-size:14px; }
+    #controls { margin-top:8px; display:flex; gap:8px; align-items:center; }
+    button { padding:6px 10px; border-radius:6px; border:1px solid #888; background:white; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div id="top">
+    <div id="tools">
+      <button class="tool active" data-tool="road">🛣 Road</button>
+      <button class="tool" data-tool="res">🏠 Residential</button>
+      <button class="tool" data-tool="com">🏬 Commercial</button>
+      <button class="tool" data-tool="ind">🏭 Industrial</button>
+      <button class="tool" data-tool="bulldoze">🧹 Bulldoze</button>
+    </div>
+    <div id="stats">
+      <div>Tick: <span id="tick">0</span></div>
+      <div>Population: <span id="pop">0</span></div>
+      <div>Jobs: <span id="jobs">0</span></div>
+      <div>Money: $<span id="money">1000</span></div>
+    </div>
+  </div>
+
+  <canvas id="canvas" width="640" height="480"></canvas>
+
+  <div id="controls">
+    <button id="start">Start</button>
+    <button id="pause">Pause</button>
+    <button id="step">Step Tick</button>
+    <button id="save">Save</button>
+    <button id="load">Load</button>
+    <label>Speed: <input id="speed" type="range" min="200" max="1200" value="600"></label>
+  </div>
+
+<script>
+(function(){
+  // Config
+  const cols = 32, rows = 24, tileSize = 20;
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = cols * tileSize;
+  canvas.height = rows * tileSize;
+
+  // Game state
+  let grid = [];
+  let tickCount = 0;
+  let running = false;
+  let simInterval = null;
+  let money = 1000;
+  let taxRate = 1; // $ per pop per tick
+  let jobPerCom = 2;
+  let jobPerInd = 3;
+
+  // Tools UI
+  let activeTool = 'road';
+  document.querySelectorAll('.tool').forEach(b=>{
+    b.addEventListener('click', ()=> {
+      document.querySelectorAll('.tool').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active');
+      activeTool = b.dataset.tool;
+    });
+  });
+
+  // UI refs
+  const elTick = document.getElementById('tick');
+  const elPop = document.getElementById('pop');
+  const elJobs = document.getElementById('jobs');
+  const elMoney = document.getElementById('money');
+  const speedInput = document.getElementById('speed');
+
+  // Init grid
+  function resetGrid(){
+    grid = [];
+    for(let y=0;y<rows;y++){
+      const row = [];
+      for(let x=0;x<cols;x++){
+        row.push({type:'empty', pop:0, jobs:0});
+      }
+      grid.push(row);
+    }
+  }
+  resetGrid();
+
+  // Helpers
+  function drawGrid(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    for(let y=0;y<rows;y++){
+      for(let x=0;x<cols;x++){
+        const t = grid[y][x].type;
+        let color = '#e0f7ff';
+        if(t==='road') color = '#bfbfbf';
+        if(t==='res') color = '#98fb98';
+        if(t==='com') color = '#ffd88f';
+        if(t==='ind') color = '#f9c0c0';
+        ctx.fillStyle = color;
+        ctx.fillRect(x*tileSize, y*tileSize, tileSize, tileSize);
+
+        // tile border
+        ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+        ctx.strokeRect(x*tileSize, y*tileSize, tileSize, tileSize);
+
+        // small text: pop/jobs
+        const cell = grid[y][x];
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.font = '10px sans-serif';
+        if(cell.pop>0) ctx.fillText(cell.pop, x*tileSize+2, y*tileSize+12);
+        if(cell.jobs>0) ctx.fillText('J'+cell.jobs, x*tileSize+2, y*tileSize+18);
+      }
+    }
+  }
+
+  function worldToTile(px, py){ return {x: Math.floor(px / tileSize), y: Math.floor(py / tileSize)}; }
+
+  // Place tile based on active tool
+  canvas.addEventListener('mousedown', e=>{
+    const rect = canvas.getBoundingClientRect();
+    const pos = worldToTile(e.clientX - rect.left, e.clientY - rect.top);
+    if(pos.x<0||pos.x>=cols||pos.y<0||pos.y>=rows) return;
+    placeAt(pos.x, pos.y, activeTool);
+    drawGrid();
+  });
+
+  function placeAt(x,y,tool){
+    if(tool==='bulldoze') {
+      grid[y][x] = {type:'empty', pop:0, jobs:0};
+      return;
+    }
+    if(tool==='road'){
+      grid[y][x] = {type:'road', pop:0, jobs:0};
+      return;
+    }
+    if(tool==='res' || tool==='com' || tool==='ind'){
+      // only allow zoning on empty or road-adjacent tiles (simple rule)
+      // we allow placing on empty or replace same zone
+      const current = grid[y][x].type;
+      // allow zoning on empty OR replace same
+      if(current==='empty' || current==='res' || current==='com' || current==='ind'){
+        grid[y][x] = {
+          type: tool==='res' ? 'res' : tool==='com' ? 'com' : 'ind',
+          pop: 0,
+          jobs: tool==='com' ? jobPerCom : tool==='ind' ? jobPerInd : 0
+        };
+      }
+    }
+  }
+
+  // Simulation tick
+  function tick(){
+    tickCount++;
+    // reset tallies
+    let totalPop = 0, totalJobs = 0;
+    // First: jobs are static per tile (for com/ind). Recompute in case we changed layout.
+    for(let y=0;y<rows;y++){
+      for(let x=0;x<cols;x++){
+        const tile = grid[y][x];
+        if(tile.type === 'com') tile.jobs = jobPerCom;
+        if(tile.type === 'ind') tile.jobs = jobPerInd;
+      }
+    }
+
+    // Growth rules: Residential grows if adjacent to a road and there are available jobs.
+    // We compute potential growth and then assign population up to available jobs.
+    for(let y=0;y<rows;y++){
+      for(let x=0;x<cols;x++){
+        const tile = grid[y][x];
+        if(tile.type === 'res'){
+          // check adjacency to road
+          const adj = [
+            [x-1,y],[x+1,y],[x,y-1],[x,y+1]
+          ];
+          const nearRoad = adj.some(a => a[0]>=0 && a[0]<cols && a[1]>=0 && a[1]<rows && grid[a[1]][a[0]].type==='road');
+          if(nearRoad){
+            // chance to increase population if jobs available globally
+            const growthChance = 0.45; // 0-1
+            if(Math.random() < growthChance){
+              tile.pop += 1; // one person moves in
+            }
+          } else {
+            // if no road, slight chance to decline
+            if(Math.random() < 0.03 && tile.pop>0) tile.pop -= 1;
+          }
+        }
+        if(tile.pop < 0) tile.pop = 0;
+        if(tile.jobs < 0) tile.jobs = 0;
+        totalPop += tile.pop;
+        totalJobs += tile.jobs;
+      }
+    }
+
+    // Economy: pay taxes from population, cost for maintenance of roads/zones
+    const income = totalPop * taxRate;
+    const maintenance = countType('road')*0.2 + (countType('com')+countType('ind')+countType('res'))*0.05;
+    money += income - maintenance;
+
+    // If jobs < pop, we reduce growth on next ticks indirectly (no direct removal for simplicity)
+    // Update UI
+    elTick.textContent = tickCount;
+    elPop.textContent = totalPop;
+    elJobs.textContent = totalJobs;
+    elMoney.textContent = Math.max(0, Math.floor(money));
+
+    drawGrid();
+  }
+
+  function countType(type){
+    let c=0;
+    for(let y=0;y<rows;y++) for(let x=0;x<cols;x++) if(grid[y][x].type===type) c++;
+    return c;
+  }
+
+  // Controls
+  document.getElementById('start').onclick = ()=>{
+    if(running) return;
+    running = true;
+    const speed = parseInt(speedInput.value,10);
+    simInterval = setInterval(tick, speed);
+  };
+  document.getElementById('pause').onclick = ()=>{
+    running=false;
+    if(simInterval) clearInterval(simInterval);
+  };
+  document.getElementById('step').onclick = ()=>{
+    tick();
+  };
+  document.getElementById('save').onclick = ()=>{
+    localStorage.setItem('tiny_town', JSON.stringify({grid, tickCount, money}));
+    alert('Saved to localStorage');
+  };
+  document.getElementById('load').onclick = ()=>{
+    const raw = localStorage.getItem('tiny_town');
+    if(!raw) { alert('No save found'); return; }
+    const obj = JSON.parse(raw);
+    grid = obj.grid;
+    tickCount = obj.tickCount || 0;
+    money = obj.money || 0;
+    drawGrid();
+  };
+
+  // Speed change
+  speedInput.oninput = ()=>{
+    if(running){
+      clearInterval(simInterval);
+      simInterval = setInterval(tick, parseInt(speedInput.value,10));
+    }
+  };
+
+  // Initial draw
+  drawGrid();
+
+  // Small helper to seed some starting road
+  function seedStarter(){
+    for(let x=5;x<cols-5;x++) placeAt(x, Math.floor(rows/2), 'road');
+    // place a few zones
+    placeAt(8, Math.floor(rows/2)-1, 'res');
+    placeAt(10, Math.floor(rows/2)-1, 'res');
+    placeAt(12, Math.floor(rows/2)-1, 'com');
+    placeAt(14, Math.floor(rows/2)-1, 'ind');
+    drawGrid();
+  }
+  seedStarter();
+
+})();
+</script>
+</body>
+</html>
